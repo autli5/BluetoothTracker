@@ -21,8 +21,10 @@ swiftc -parse-as-library \
   -framework IOKit \
   -framework CoreAudio \
   -framework AudioToolbox \
+  -framework UserNotifications \
   "$DIR/Sources/blts_tracker/Models/BluetoothDeviceModel.swift" \
   "$DIR/Sources/blts_tracker/Services/BluetoothTracker.swift" \
+  "$DIR/Sources/blts_tracker/Services/UpdaterService.swift" \
   "$DIR/Sources/blts_tracker/BLTSTrackerApp.swift" \
   -o "$MACOS_DIR/blts_tracker"
 

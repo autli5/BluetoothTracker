@@ -6,6 +6,7 @@ import CoreAudio
 @main
 struct BLTSTrackerApp: App {
     @ObservedObject var tracker = BluetoothTracker.shared
+    @ObservedObject var updater = UpdaterService.shared
 
     var body: some Scene {
         MenuBarExtra {
@@ -56,6 +57,12 @@ struct BLTSTrackerApp: App {
             tracker.refreshNow()
         }
         .keyboardShortcut("r")
+        
+        Button(updater.isUpdating ? "Обновление..." : "🔄 Обновить из GitHub") {
+            updater.checkForUpdatesAndApply()
+        }
+        .disabled(updater.isUpdating)
+        .keyboardShortcut("u")
         
         Divider()
         
