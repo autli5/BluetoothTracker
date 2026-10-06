@@ -1,71 +1,119 @@
-import SwiftUI
+import Cocoa
 import IOBluetooth
 import IOKit
 import CoreAudio
 
 @main
-struct BLTSTrackerApp: App {
-    @ObservedObject var tracker = BluetoothTracker.shared
-    @ObservedObject var updater = UpdaterService.shared
-
-    var body: some Scene {
-        MenuBarExtra {
-            menuContent
-        } label: {
-            menuBarLabel
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private let tracker = BluetoothTracker.shared
+    private let updater = UpdaterService.shared
+    
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
+    }
+    
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Create native status bar item
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "headphones", accessibilityDescription: "Bluetooth Battery")
+            button.imagePosition = .imageLeft
+        }
+        
+        setupMenu()
+        
+        // Listen to real-time tracker updates
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTrackerUpdate),
+            name: BluetoothTracker.didUpdateNotification,
+            object: nil
+        )
+        
+        // Initial render
+        updateStatusItem()
+    }
+    
+    @objc private func handleTrackerUpdate() {
+        DispatchQueue.main.async { [weak self] in
+            self?.updateStatusItem()
+            self?.setupMenu()
         }
     }
     
-    @ViewBuilder
-    private var menuBarLabel: some View {
+    private func updateStatusItem() {
+        guard let button = statusItem?.button else { return }
+        
         let active = tracker.activeHeadphone
         let isConn = active?.isConnected == true
         let percent = active?.primaryBatteryPercent
         
-        if isConn, let p = percent {
-            Label(" \(p)%", systemImage: "headphones")
-                .labelStyle(.titleAndIcon)
+        button.image = NSImage(systemSymbolName: "headphones", accessibilityDescription: "Bluetooth Battery")
+        
+        if isConn, let p = percent, p > 0 {
+            button.title = " \(p)%"
         } else {
-            Label("", systemImage: "headphones")
-                .labelStyle(.iconOnly)
+            button.title = ""
         }
     }
     
-    @ViewBuilder
-    private var menuContent: some View {
-        if let dev = tracker.activeHeadphone, dev.isConnected {
+    private func setupMenu() {
+        let menu = NSMenu()
+        
+        let active = tracker.activeHeadphone
+        if let dev = active, dev.isConnected {
             let percentStr = dev.primaryBatteryPercent != nil ? "\(dev.primaryBatteryPercent!)%" : "Подключено"
-            Text("🎧 \(dev.name): \(percentStr)")
-                .font(.headline)
+            let titleItem = NSMenuItem(title: "🎧 \(dev.name): \(percentStr)", action: nil, keyEquivalent: "")
+            titleItem.isEnabled = false
+            menu.addItem(titleItem)
             
             if let l = dev.leftBattery, let r = dev.rightBattery {
-                Text("Левый: \(l)% | Правый: \(r)%")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                let subItem = NSMenuItem(title: "   Левый: \(l)% | Правый: \(r)%", action: nil, keyEquivalent: "")
+                subItem.isEnabled = false
+                menu.addItem(subItem)
             }
         } else {
-            Text("🎧 Наушники не подключены")
-                .foregroundColor(.secondary)
+            let item = NSMenuItem(title: "🎧 Наушники не подключены", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
         }
         
-        Divider()
+        menu.addItem(NSMenuItem.separator())
         
-        Button("Обновить заряд") {
-            tracker.refreshNow()
-        }
-        .keyboardShortcut("r")
+        let refreshItem = NSMenuItem(title: "🔄 Обновить заряд", action: #selector(refreshClicked), keyEquivalent: "r")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
         
-        Button(updater.isUpdating ? "Обновление..." : "🔄 Обновить из GitHub") {
-            updater.checkForUpdatesAndApply()
-        }
-        .disabled(updater.isUpdating)
-        .keyboardShortcut("u")
+        let updateTitle = updater.isUpdating ? "⏳ Обновление..." : "🌐 Обновить из GitHub"
+        let updateItem = NSMenuItem(title: updateTitle, action: #selector(updateClicked), keyEquivalent: "u")
+        updateItem.target = self
+        if updater.isUpdating { updateItem.isEnabled = false }
+        menu.addItem(updateItem)
         
-        Divider()
+        menu.addItem(NSMenuItem.separator())
         
-        Button("Завершить") {
-            NSApplication.shared.terminate(nil)
-        }
-        .keyboardShortcut("q")
+        let quitItem = NSMenuItem(title: "Завершить", action: #selector(quitClicked), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+        
+        statusItem.menu = menu
+    }
+    
+    @objc private func refreshClicked() {
+        tracker.refreshNow()
+    }
+    
+    @objc private func updateClicked() {
+        updater.checkForUpdatesAndApply()
+    }
+    
+    @objc private func quitClicked() {
+        NSApplication.shared.terminate(nil)
     }
 }

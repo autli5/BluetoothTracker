@@ -6,9 +6,15 @@ import AudioToolbox
 
 public final class BluetoothTracker: ObservableObject {
     public static let shared = BluetoothTracker()
+    public static let didUpdateNotification = Notification.Name("BLTSTrackerDidUpdateNotification")
     
     @Published public var activeHeadphone: BluetoothDeviceModel?
     @Published public var devices: [BluetoothDeviceModel] = []
+    
+    // Direct primitive properties for instant reactivity
+    @Published public var currentBatteryPercent: Int?
+    @Published public var currentDeviceName: String = ""
+    @Published public var isConnected: Bool = false
     
     private var timer: Timer?
     private var lastValidBattery: [String: Int] = [:]
@@ -16,7 +22,7 @@ public final class BluetoothTracker: ObservableObject {
     private typealias IntBatteryGetter = @convention(c) (AnyObject, Selector) -> Int
     private typealias BoolGetter = @convention(c) (AnyObject, Selector) -> Bool
     
-    private init() {
+    public init() {
         setupBluetoothListeners()
         startTracking()
     }
@@ -29,8 +35,8 @@ public final class BluetoothTracker: ObservableObject {
         stopTracking()
         updateDeviceList()
         
-        // Use .common mode so timer runs continuously without pausing
-        let t = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
+        // 1.0 second high-frequency poll in .common runloop mode
+        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateDeviceList()
         }
         RunLoop.main.add(t, forMode: .common)
@@ -65,7 +71,7 @@ public final class BluetoothTracker: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.updateDeviceList()
         }
-        for delay in [0.2, 0.6, 1.2, 2.0] {
+        for delay in [0.2, 0.5, 1.0, 1.5, 2.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.updateDeviceList()
             }
@@ -91,7 +97,7 @@ public final class BluetoothTracker: ObservableObject {
                 
                 let majorClass = UInt32(device.deviceClassMajor)
                 let minorClass = UInt32(device.deviceClassMinor)
-                let isAudio = (majorClass == 4) || isLikelyHeadphones(name: name, minorClass: minorClass) || isAudioOutput
+                let isAudio = (majorClass == 4) || isLikelyHeadphones(name: name, minorClass: minorClass, majorClass: majorClass) || isAudioOutput
                 
                 var isMulti = false
                 let selMulti = Selector(("isMultiBatteryDevice"))
@@ -137,11 +143,19 @@ public final class BluetoothTracker: ObservableObject {
         let foundActive = updatedList.first(where: { $0.isConnected && $0.isAudioDevice })
             ?? updatedList.first(where: { $0.isConnected })
         
+        let newPercent = foundActive?.primaryBatteryPercent
+        let newName = foundActive?.name ?? ""
+        let newConnected = foundActive?.isConnected == true
+        
         let applyUpdate = { [weak self] in
             guard let self = self else { return }
             self.objectWillChange.send()
             self.devices = updatedList
             self.activeHeadphone = foundActive
+            self.currentBatteryPercent = newPercent
+            self.currentDeviceName = newName
+            self.isConnected = newConnected
+            NotificationCenter.default.post(name: BluetoothTracker.didUpdateNotification, object: self)
         }
         
         if Thread.isMainThread {
@@ -151,7 +165,7 @@ public final class BluetoothTracker: ObservableObject {
         }
     }
     
-    private func getActiveCoreAudioDeviceName() -> String? {
+    public func getActiveCoreAudioDeviceName() -> String? {
         var defaultOutputDeviceID = AudioDeviceID(0)
         var propertySize = UInt32(MemoryLayout<AudioDeviceID>.size)
         var propertyAddress = AudioObjectPropertyAddress(
@@ -194,13 +208,18 @@ public final class BluetoothTracker: ObservableObject {
         return nil
     }
     
-    private func isLikelyHeadphones(name: String, minorClass: UInt32) -> Bool {
+    public func isLikelyHeadphones(name: String, minorClass: UInt32, majorClass: UInt32 = 0) -> Bool {
         let lower = name.lowercased()
+        let nonAudioKeywords = ["mouse", "keyboard", "trackpad", "pen", "pencil", "watch"]
+        for nonKw in nonAudioKeywords {
+            if lower.contains(nonKw) { return false }
+        }
+        
         let keywords = ["buds", "pods", "freebuds", "airpods", "headphone", "headset", "earphone", "earbuds", "wh-", "wf-", "qc", "bose", "sony", "jbl", "beats", "marshall", "sennheiser", "soundcore", "pixel buds", "galaxy buds"]
         for kw in keywords {
             if lower.contains(kw) { return true }
         }
-        if minorClass >= 1 && minorClass <= 6 {
+        if majorClass == 4 && (minorClass >= 1 && minorClass <= 6) {
             return true
         }
         return false
@@ -232,6 +251,7 @@ public final class BluetoothTracker: ObservableObject {
                 ?? getBatteryValue(selectorName: "headsetBatteryPercent")
                 ?? getBatteryValue(selectorName: "batteryLevel")
                 ?? getBatteryValue(selectorName: "batteryPercentCombined")
+                ?? getBatteryValue(selectorName: "batteryPercentLeft")
             
             if let single = single {
                 lastValidBattery[addr] = single
@@ -269,17 +289,17 @@ public final class BluetoothTracker: ObservableObject {
                     
                     if matchByName || matchByAddr {
                         if let b = batt, b > 0 && b <= 100 {
-                            if devices[i].singleBattery == nil { devices[i].singleBattery = b }
+                            devices[i].singleBattery = b
                         }
                         if devices[i].isMultiBattery {
                             if let bl = battLeft, bl > 0 && bl <= 100 {
-                                if devices[i].leftBattery == nil { devices[i].leftBattery = bl }
+                                devices[i].leftBattery = bl
                             }
                             if let br = battRight, br > 0 && br <= 100 {
-                                if devices[i].rightBattery == nil { devices[i].rightBattery = br }
+                                devices[i].rightBattery = br
                             }
                             if let bc = battCase, bc > 0 && bc <= 100 {
-                                if devices[i].caseBattery == nil { devices[i].caseBattery = bc }
+                                devices[i].caseBattery = bc
                             }
                         }
                     }
