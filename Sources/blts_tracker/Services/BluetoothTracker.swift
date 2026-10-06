@@ -17,8 +17,8 @@ public final class BluetoothTracker: ObservableObject {
     @Published public var isConnected: Bool = false
     
     private var timerSource: DispatchSourceTimer?
+    private var knownBatteries: [String: Int] = [:]
     
-    private typealias VoidFn = @convention(c) (AnyObject, Selector) -> Void
     private typealias IntBatteryGetter = @convention(c) (AnyObject, Selector) -> Int
     private typealias BoolGetter = @convention(c) (AnyObject, Selector) -> Bool
     
@@ -35,7 +35,7 @@ public final class BluetoothTracker: ObservableObject {
         stopTracking()
         updateDeviceList()
         
-        // Kernel-level DispatchSourceTimer: strictly 1 second interval, no caching
+        // Kernel-level DispatchSourceTimer: strictly 1 second interval
         let timer = DispatchSource.makeTimerSource(flags: .strict, queue: DispatchQueue.main)
         timer.schedule(deadline: .now() + 1.0, repeating: 1.0, leeway: .milliseconds(50))
         timer.setEventHandler { [weak self] in
@@ -89,18 +89,12 @@ public final class BluetoothTracker: ObservableObject {
         var updatedList: [BluetoothDeviceModel] = []
         let activeAudioName = getActiveCoreAudioDeviceName()
         
-        // 1. Scan IOBluetooth paired devices directly (zero caching)
+        // 1. Scan IOBluetooth paired devices
         if let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] {
             for pairedDev in pairedDevices {
                 let address = pairedDev.addressString ?? UUID().uuidString
                 let device = IOBluetoothDevice(addressString: address) ?? pairedDev
                 let name = device.nameOrAddress ?? pairedDev.nameOrAddress ?? "Unknown Device"
-                
-                // Force sync state from bluetooth daemon
-                syncFromServer(device: device)
-                if device !== pairedDev {
-                    syncFromServer(device: pairedDev)
-                }
                 
                 let isAudioOutput = activeAudioName != nil && (
                     name.caseInsensitiveCompare(activeAudioName!) == .orderedSame ||
@@ -134,13 +128,15 @@ public final class BluetoothTracker: ObservableObject {
                 
                 if isConnected {
                     extractBatteryLevels(from: device, fallbackDevice: pairedDev, into: &model, isMulti: isMulti)
+                } else {
+                    knownBatteries.removeValue(forKey: address)
                 }
                 
                 updatedList.append(model)
             }
         }
         
-        // 2. IOKit Registry live enrich (zero caching)
+        // 2. IOKit Registry enrich
         enrichFromIORegistry(devices: &updatedList)
         
         // 3. Sort: Connected audio first
@@ -176,15 +172,6 @@ public final class BluetoothTracker: ObservableObject {
             applyUpdate()
         } else {
             DispatchQueue.main.async(execute: applyUpdate)
-        }
-    }
-    
-    private func syncFromServer(device: IOBluetoothDevice) {
-        let selUpdate = Selector(("updateFromServer"))
-        if device.responds(to: selUpdate) {
-            let imp = device.method(for: selUpdate)
-            let fn = unsafeBitCast(imp, to: VoidFn.self)
-            fn(device, selUpdate)
         }
     }
     
@@ -266,6 +253,8 @@ public final class BluetoothTracker: ObservableObject {
                 ?? (fallbackDevice != nil ? getBatteryValue(from: fallbackDevice!, selectorName: selectorName) : nil)
         }
         
+        let addr = model.address
+        
         if isMulti {
             model.leftBattery = query(selectorName: "batteryPercentLeft")
             model.rightBattery = query(selectorName: "batteryPercentRight")
@@ -279,7 +268,12 @@ public final class BluetoothTracker: ObservableObject {
                 ?? query(selectorName: "batteryPercentCombined")
                 ?? query(selectorName: "batteryPercentLeft")
             
-            model.singleBattery = single
+            if let single = single {
+                knownBatteries[addr] = single
+                model.singleBattery = single
+            } else if let known = knownBatteries[addr] {
+                model.singleBattery = known
+            }
         }
     }
     
@@ -311,6 +305,7 @@ public final class BluetoothTracker: ObservableObject {
                     if matchByName || matchByAddr {
                         if let b = batt, b > 0 && b <= 100 {
                             devices[i].singleBattery = b
+                            knownBatteries[devices[i].address] = b
                         }
                         if devices[i].isMultiBattery {
                             if let bl = battLeft, bl > 0 && bl <= 100 {
