@@ -18,6 +18,7 @@ public final class BluetoothTracker: ObservableObject {
     
     private var timerSource: DispatchSourceTimer?
     
+    private typealias VoidFn = @convention(c) (AnyObject, Selector) -> Void
     private typealias IntBatteryGetter = @convention(c) (AnyObject, Selector) -> Int
     private typealias BoolGetter = @convention(c) (AnyObject, Selector) -> Bool
     
@@ -95,6 +96,12 @@ public final class BluetoothTracker: ObservableObject {
                 let device = IOBluetoothDevice(addressString: address) ?? pairedDev
                 let name = device.nameOrAddress ?? pairedDev.nameOrAddress ?? "Unknown Device"
                 
+                // Force sync state from bluetooth daemon
+                syncFromServer(device: device)
+                if device !== pairedDev {
+                    syncFromServer(device: pairedDev)
+                }
+                
                 let isAudioOutput = activeAudioName != nil && (
                     name.caseInsensitiveCompare(activeAudioName!) == .orderedSame ||
                     activeAudioName!.localizedCaseInsensitiveContains(name) ||
@@ -169,6 +176,15 @@ public final class BluetoothTracker: ObservableObject {
             applyUpdate()
         } else {
             DispatchQueue.main.async(execute: applyUpdate)
+        }
+    }
+    
+    private func syncFromServer(device: IOBluetoothDevice) {
+        let selUpdate = Selector(("updateFromServer"))
+        if device.responds(to: selUpdate) {
+            let imp = device.method(for: selUpdate)
+            let fn = unsafeBitCast(imp, to: VoidFn.self)
+            fn(device, selUpdate)
         }
     }
     
