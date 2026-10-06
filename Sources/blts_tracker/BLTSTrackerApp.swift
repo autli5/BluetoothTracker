@@ -5,13 +5,18 @@ import CoreAudio
 
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static var appDelegateInstance: AppDelegate?
+    
     private var statusItem: NSStatusItem!
     private let tracker = BluetoothTracker.shared
     private let updater = UpdaterService.shared
+    private var refreshTimer: Timer?
     
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
+        // Strong reference to prevent ARC deallocation of weak NSApplication.delegate
+        appDelegateInstance = delegate
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
         app.run()
@@ -44,6 +49,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Start active tracking
         tracker.startTracking()
+        
+        // Direct main thread timer in AppDelegate for guaranteed 1-second UI refresh
+        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.tracker.updateDeviceList()
+            self?.updateStatusItem()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        self.refreshTimer = t
         
         // Initial render
         updateStatusItem()
@@ -123,6 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc private func refreshClicked() {
         tracker.refreshNow()
+        updateStatusItem()
+        setupMenu()
     }
     
     @objc private func updateClicked() {
