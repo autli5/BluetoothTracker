@@ -33,6 +33,14 @@ if [ -f "$DIR/AppIcon.icns" ]; then
   cp "$DIR/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 fi
 
-chmod +x "$MACOS_DIR/blts_tracker"
+swiftc \
+  -module-cache-path "$MODULE_CACHE" \
+  -O \
+  -framework Foundation \
+  -framework IOBluetooth \
+  "$DIR/Sources/battery_probe/main.swift" \
+  -o "$MACOS_DIR/battery_probe"
+
+chmod +x "$MACOS_DIR/blts_tracker" "$MACOS_DIR/battery_probe"
 
 echo "✅ Successfully built: $APP_DIR"
