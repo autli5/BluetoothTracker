@@ -8,18 +8,64 @@ public final class UpdaterService: ObservableObject {
     
     @Published public var isUpdating: Bool = false
     @Published public var updateStatusMessage: String = ""
+    @Published public var progressText: String = ""
+    @Published public var progressVisual: String = "▰▱▱▱▱"
+    
+    private var animationTimer: Timer?
+    private var animIndex = 0
+    private let animFrames = ["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰", "▱▱▱▱▱"]
     
     private init() {}
+    
+    private func startAnimation(initialStage: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.progressText = initialStage
+            self.progressVisual = self.animFrames[0]
+            self.animationTimer?.invalidate()
+            self.animIndex = 0
+            
+            self.animationTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+                guard let self = self, self.isUpdating else { return }
+                self.animIndex = (self.animIndex + 1) % self.animFrames.count
+                self.progressVisual = self.animFrames[self.animIndex]
+                NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
+            }
+            RunLoop.main.add(self.animationTimer!, forMode: .common)
+            NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
+        }
+    }
+    
+    private func updateStage(stage: String, visual: String? = nil) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.progressText = stage
+            if let v = visual { self.progressVisual = v }
+            NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
+        }
+    }
+    
+    private func stopAnimation() {
+        DispatchQueue.main.async { [weak self] in
+            self?.animationTimer?.invalidate()
+            self?.animationTimer = nil
+            self?.isUpdating = false
+            NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
+        }
+    }
     
     public func checkForUpdatesAndApply() {
         guard !isUpdating else { return }
         
         isUpdating = true
         updateStatusMessage = "Проверка обновлений на GitHub..."
-        NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
+        startAnimation(initialStage: "Проверка")
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let projectDir = "/Users/autli/Documents/blts_tracker"
+            
+            self?.updateStage(stage: "Связь с GitHub", visual: "▰▰▱▱▱")
+            
             let updateScript = """
             cd "\(projectDir)"
             git -c http.timeout=8 fetch origin main 2>&1
@@ -66,16 +112,29 @@ public final class UpdaterService: ObservableObject {
             
             do {
                 try process.run()
+                
+                // Advance visual stages during execution
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
+                    if self?.isUpdating == true {
+                        self?.updateStage(stage: "Загрузка", visual: "▰▰▰▱▱")
+                    }
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2.5) {
+                    if self?.isUpdating == true {
+                        self?.updateStage(stage: "Сборка", visual: "▰▰▰▰▱")
+                    }
+                }
+                
                 process.waitUntilExit()
                 
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 let output = String(data: data, encoding: .utf8) ?? ""
                 
                 DispatchQueue.main.async {
-                    self?.isUpdating = false
-                    NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
+                    self?.stopAnimation()
                     
                     if output.contains("SUCCESS") {
+                        self?.updateStage(stage: "Готово", visual: "▰▰▰▰▰")
                         self?.sendNotification(
                             title: "🎉 Обновление установлено",
                             body: "BLTS Tracker успешно обновлён с GitHub! Перезапуск..."
@@ -107,8 +166,7 @@ public final class UpdaterService: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self?.isUpdating = false
-                    NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
+                    self?.stopAnimation()
                     self?.sendNotification(
                         title: "⚠️ Ошибка",
                         body: "Не удалось выполнить проверку: \(error.localizedDescription)"

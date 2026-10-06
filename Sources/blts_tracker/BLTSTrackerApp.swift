@@ -56,6 +56,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusItem() {
         guard let button = statusItem?.button else { return }
         
+        if updater.isUpdating {
+            button.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Updating")
+            let text = updater.progressText.isEmpty ? "Обновление" : updater.progressText
+            button.title = " \(updater.progressVisual) \(text)"
+            return
+        }
+        
         let active = tracker.activeHeadphone
         let isConn = active?.isConnected == true
         let percent = active?.primaryBatteryPercent
