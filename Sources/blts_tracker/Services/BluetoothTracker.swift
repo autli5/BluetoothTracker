@@ -17,7 +17,6 @@ public final class BluetoothTracker: ObservableObject {
     @Published public var isConnected: Bool = false
     
     private var timerSource: DispatchSourceTimer?
-    private var lastValidBattery: [String: Int] = [:]
     
     private typealias IntBatteryGetter = @convention(c) (AnyObject, Selector) -> Int
     private typealias BoolGetter = @convention(c) (AnyObject, Selector) -> Bool
@@ -35,7 +34,7 @@ public final class BluetoothTracker: ObservableObject {
         stopTracking()
         updateDeviceList()
         
-        // Kernel-level DispatchSourceTimer: Immune to RunLoop pauses or UI tracking modes
+        // Kernel-level DispatchSourceTimer: strictly 1 second interval, no caching
         let timer = DispatchSource.makeTimerSource(flags: .strict, queue: DispatchQueue.main)
         timer.schedule(deadline: .now() + 1.0, repeating: 1.0, leeway: .milliseconds(50))
         timer.setEventHandler { [weak self] in
@@ -55,18 +54,23 @@ public final class BluetoothTracker: ObservableObject {
     }
     
     private func setupBluetoothListeners() {
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleBluetoothChange),
-            name: NSNotification.Name("IOBluetoothDeviceWasConnectedNotification"),
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleBluetoothChange),
-            name: NSNotification.Name("IOBluetoothDeviceWasDisconnectedNotification"),
-            object: nil
-        )
+        let notificationNames = [
+            "IOBluetoothDeviceWasConnectedNotification",
+            "IOBluetoothDeviceWasDisconnectedNotification",
+            "IOBluetoothDeviceNotification",
+            "IOBluetoothDeviceServicesResolvedNotification",
+            "IOBluetoothDeviceNameChangedNotification",
+            "IOBluetoothHandsFreeDeviceDidUpdateNotification"
+        ]
+        
+        for name in notificationNames {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleBluetoothChange),
+                name: NSNotification.Name(name),
+                object: nil
+            )
+        }
     }
     
     @objc private func handleBluetoothChange() {
@@ -84,11 +88,10 @@ public final class BluetoothTracker: ObservableObject {
         var updatedList: [BluetoothDeviceModel] = []
         let activeAudioName = getActiveCoreAudioDeviceName()
         
-        // 1. Scan IOBluetooth paired devices
+        // 1. Scan IOBluetooth paired devices directly (zero caching)
         if let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] {
             for pairedDev in pairedDevices {
                 let address = pairedDev.addressString ?? UUID().uuidString
-                // Re-instantiate device to bypass any internal property caching
                 let device = IOBluetoothDevice(addressString: address) ?? pairedDev
                 let name = device.nameOrAddress ?? pairedDev.nameOrAddress ?? "Unknown Device"
                 
@@ -130,7 +133,7 @@ public final class BluetoothTracker: ObservableObject {
             }
         }
         
-        // 2. IOKit Registry enrich
+        // 2. IOKit Registry live enrich (zero caching)
         enrichFromIORegistry(devices: &updatedList)
         
         // 3. Sort: Connected audio first
@@ -247,8 +250,6 @@ public final class BluetoothTracker: ObservableObject {
                 ?? (fallbackDevice != nil ? getBatteryValue(from: fallbackDevice!, selectorName: selectorName) : nil)
         }
         
-        let addr = model.address
-        
         if isMulti {
             model.leftBattery = query(selectorName: "batteryPercentLeft")
             model.rightBattery = query(selectorName: "batteryPercentRight")
@@ -262,12 +263,7 @@ public final class BluetoothTracker: ObservableObject {
                 ?? query(selectorName: "batteryPercentCombined")
                 ?? query(selectorName: "batteryPercentLeft")
             
-            if let single = single {
-                lastValidBattery[addr] = single
-                model.singleBattery = single
-            } else if let cached = lastValidBattery[addr] {
-                model.singleBattery = cached
-            }
+            model.singleBattery = single
         }
     }
     
