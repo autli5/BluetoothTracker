@@ -5,8 +5,10 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 APP_NAME="BLTS Tracker.app"
 SOURCE_APP="$DIR/$APP_NAME"
 
-echo "🛑 Завершение запущенных копий..."
-killall blts_tracker 2>/dev/null || true
+echo "🛑 Завершение всех запущенных копий..."
+killall -9 blts_tracker 2>/dev/null || true
+pkill -9 -f "BLTS Tracker" 2>/dev/null || true
+pkill -9 -f "blts_tracker" 2>/dev/null || true
 sleep 1
 
 echo "🔨 Сборка приложения..."
@@ -29,4 +31,4 @@ osascript -e "tell application \"System Events\" to make login item at end with 
 echo "🚀 Запуск $TARGET_APP..."
 open "$TARGET_APP"
 
-echo "✅ Готово! BLTS Tracker обновлен."
+echo "✅ Готово! BLTS Tracker обновлен и запущен."

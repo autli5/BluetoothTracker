@@ -79,7 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
-        let active = tracker.activeHeadphone
+        // Find best active device (either marked active or any connected device with battery data)
+        let active = tracker.activeHeadphone ?? tracker.devices.first(where: { $0.isConnected && $0.primaryBatteryPercent != nil })
         let isConn = active?.isConnected == true
         let percent = active?.primaryBatteryPercent
         
@@ -95,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupMenu() {
         let menu = NSMenu()
         
-        let active = tracker.activeHeadphone
+        let active = tracker.activeHeadphone ?? tracker.devices.first(where: { $0.isConnected && $0.primaryBatteryPercent != nil })
         if let dev = active, dev.isConnected {
             let percentStr = dev.primaryBatteryPercent != nil ? "\(dev.primaryBatteryPercent!)%" : "Подключено"
             let titleItem = NSMenuItem(title: "🎧 \(dev.name): \(percentStr)", action: nil, keyEquivalent: "")
