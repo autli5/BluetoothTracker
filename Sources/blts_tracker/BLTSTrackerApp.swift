@@ -35,6 +35,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: BluetoothTracker.didUpdateNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTrackerUpdate),
+            name: UpdaterService.didUpdateStateNotification,
+            object: nil
+        )
         
         // Initial render
         updateStatusItem()

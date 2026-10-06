@@ -4,6 +4,7 @@ import AppKit
 
 public final class UpdaterService: ObservableObject {
     public static let shared = UpdaterService()
+    public static let didUpdateStateNotification = Notification.Name("UpdaterServiceDidUpdateStateNotification")
     
     @Published public var isUpdating: Bool = false
     @Published public var updateStatusMessage: String = ""
@@ -15,12 +16,20 @@ public final class UpdaterService: ObservableObject {
         
         isUpdating = true
         updateStatusMessage = "Проверка обновлений на GitHub..."
+        NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let projectDir = "/Users/autli/Documents/blts_tracker"
             let updateScript = """
             cd "\(projectDir)"
-            git fetch origin main 2>&1
+            git -c http.timeout=8 fetch origin main 2>&1
+            FETCH_STATUS=$?
+            
+            if [ $FETCH_STATUS -ne 0 ]; then
+                echo "NETWORK_ERROR"
+                exit 0
+            fi
+            
             LOCAL=$(git rev-parse HEAD)
             REMOTE=$(git rev-parse origin/main)
             
@@ -64,6 +73,7 @@ public final class UpdaterService: ObservableObject {
                 
                 DispatchQueue.main.async {
                     self?.isUpdating = false
+                    NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
                     
                     if output.contains("SUCCESS") {
                         self?.sendNotification(
@@ -78,13 +88,17 @@ public final class UpdaterService: ObservableObject {
                             try? p.run()
                             exit(0)
                         }
+                    } else if output.contains("NETWORK_ERROR") {
+                        self?.sendNotification(
+                            title: "⚠️ Ошибка сети",
+                            body: "Не удалось связаться с GitHub. Проверьте интернет или отключите VPN."
+                        )
                     } else if output.contains("UP_TO_DATE") {
                         self?.sendNotification(
                             title: "✅ У вас последняя версия",
                             body: "Обновлений на GitHub нет, установлена актуальная версия."
                         )
                     } else {
-                        print("Update output: \(output)")
                         self?.sendNotification(
                             title: "ℹ️ Проверка завершена",
                             body: "Репозиторий проверен. Код актуален."
@@ -94,7 +108,11 @@ public final class UpdaterService: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     self?.isUpdating = false
-                    print("Failed to run update: \(error)")
+                    NotificationCenter.default.post(name: UpdaterService.didUpdateStateNotification, object: self)
+                    self?.sendNotification(
+                        title: "⚠️ Ошибка",
+                        body: "Не удалось выполнить проверку: \(error.localizedDescription)"
+                    )
                 }
             }
         }
