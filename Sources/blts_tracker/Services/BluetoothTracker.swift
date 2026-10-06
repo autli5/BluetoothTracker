@@ -11,8 +11,6 @@ public final class BluetoothTracker: ObservableObject {
     @Published public var devices: [BluetoothDeviceModel] = []
     
     private var timer: Timer?
-    private var lastKnownBattery: [String: Int] = [:]
-    
     private typealias IntBatteryGetter = @convention(c) (AnyObject, Selector) -> Int
     private typealias BoolGetter = @convention(c) (AnyObject, Selector) -> Bool
     
@@ -28,6 +26,7 @@ public final class BluetoothTracker: ObservableObject {
     public func startTracking() {
         stopTracking()
         updateDeviceList()
+        // Fast 1.5s real-time poll
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             self?.updateDeviceList()
         }
@@ -61,8 +60,7 @@ public final class BluetoothTracker: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.updateDeviceList()
         }
-        // Retries during the first 3 seconds to catch the telemetry packet as soon as handshake finishes
-        for delay in [0.4, 0.8, 1.2, 1.8, 2.5] {
+        for delay in [0.3, 0.8, 1.5, 2.5] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.updateDeviceList()
             }
@@ -79,7 +77,11 @@ public final class BluetoothTracker: ObservableObject {
                 let name = device.nameOrAddress ?? "Unknown Device"
                 let address = device.addressString ?? UUID().uuidString
                 
-                let isAudioOutput = activeAudioName != nil && (name.caseInsensitiveCompare(activeAudioName!) == .orderedSame || activeAudioName!.localizedCaseInsensitiveContains(name) || name.localizedCaseInsensitiveContains(activeAudioName!))
+                let isAudioOutput = activeAudioName != nil && (
+                    name.caseInsensitiveCompare(activeAudioName!) == .orderedSame ||
+                    activeAudioName!.localizedCaseInsensitiveContains(name) ||
+                    name.localizedCaseInsensitiveContains(activeAudioName!)
+                )
                 let isConnected = device.isConnected() || isAudioOutput
                 
                 let majorClass = UInt32(device.deviceClassMajor)
@@ -116,7 +118,7 @@ public final class BluetoothTracker: ObservableObject {
         // 2. IOKit Registry enrich
         enrichFromIORegistry(devices: &updatedList)
         
-        // 3. Sort
+        // 3. Sort: Connected audio first, then connected other, then paired audio
         updatedList.sort { d1, d2 in
             if d1.isConnected != d2.isConnected {
                 return d1.isConnected && !d2.isConnected
@@ -206,13 +208,12 @@ public final class BluetoothTracker: ObservableObject {
             let imp = device.method(for: sel)
             let fn = unsafeBitCast(imp, to: IntBatteryGetter.self)
             let val = fn(device, sel)
+            // Valid battery percentages are 1 to 100
             if val > 0 && val <= 100 {
                 return val
             }
             return nil
         }
-        
-        let addr = model.address
         
         if isMulti {
             model.leftBattery = getBatteryValue(selectorName: "batteryPercentLeft")
@@ -227,11 +228,7 @@ public final class BluetoothTracker: ObservableObject {
                 ?? getBatteryValue(selectorName: "batteryPercentCombined")
             
             if let single = single {
-                lastKnownBattery[addr] = single
                 model.singleBattery = single
-            } else if let cached = lastKnownBattery[addr] {
-                // Keep smooth previous valid level during connection handshake
-                model.singleBattery = cached
             }
         }
     }

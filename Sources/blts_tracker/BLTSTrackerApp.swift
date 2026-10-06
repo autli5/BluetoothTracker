@@ -25,7 +25,7 @@ struct BLTSTrackerApp: App {
             Label(" \(p)%", systemImage: "headphones")
                 .labelStyle(.titleAndIcon)
         } else if isConn {
-            Label(" 100%", systemImage: "headphones")
+            Label(" ...", systemImage: "headphones")
                 .labelStyle(.titleAndIcon)
         } else {
             Label("", systemImage: "headphones")
@@ -36,9 +36,15 @@ struct BLTSTrackerApp: App {
     @ViewBuilder
     private var menuContent: some View {
         if let dev = tracker.activeHeadphone, dev.isConnected {
-            let percentStr = dev.primaryBatteryPercent != nil ? "\(dev.primaryBatteryPercent!)%" : "100%"
+            let percentStr = dev.primaryBatteryPercent != nil ? "\(dev.primaryBatteryPercent!)%" : "Определение..."
             Text("🎧 \(dev.name): \(percentStr)")
                 .font(.headline)
+            
+            if let l = dev.leftBattery, let r = dev.rightBattery {
+                Text("Левый: \(l)% | Правый: \(r)%")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         } else {
             Text("🎧 Наушники не подключены")
                 .foregroundColor(.secondary)
@@ -46,7 +52,7 @@ struct BLTSTrackerApp: App {
         
         Divider()
         
-        Button("Обновить статус") {
+        Button("Обновить заряд") {
             tracker.refreshNow()
         }
         .keyboardShortcut("r")
