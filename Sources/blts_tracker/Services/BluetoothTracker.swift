@@ -11,6 +11,8 @@ public final class BluetoothTracker: ObservableObject {
     @Published public var devices: [BluetoothDeviceModel] = []
     
     private var timer: Timer?
+    private var lastValidBattery: [String: Int] = [:]
+    
     private typealias IntBatteryGetter = @convention(c) (AnyObject, Selector) -> Int
     private typealias BoolGetter = @convention(c) (AnyObject, Selector) -> Bool
     
@@ -26,10 +28,13 @@ public final class BluetoothTracker: ObservableObject {
     public func startTracking() {
         stopTracking()
         updateDeviceList()
-        // Fast 1.5s real-time poll
-        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        
+        // Use .common mode so timer runs continuously without pausing
+        let t = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
             self?.updateDeviceList()
         }
+        RunLoop.main.add(t, forMode: .common)
+        self.timer = t
     }
     
     public func stopTracking() {
@@ -60,7 +65,7 @@ public final class BluetoothTracker: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.updateDeviceList()
         }
-        for delay in [0.3, 0.8, 1.5, 2.5] {
+        for delay in [0.2, 0.6, 1.2, 2.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.updateDeviceList()
             }
@@ -118,7 +123,7 @@ public final class BluetoothTracker: ObservableObject {
         // 2. IOKit Registry enrich
         enrichFromIORegistry(devices: &updatedList)
         
-        // 3. Sort: Connected audio first, then connected other, then paired audio
+        // 3. Sort: Connected audio first
         updatedList.sort { d1, d2 in
             if d1.isConnected != d2.isConnected {
                 return d1.isConnected && !d2.isConnected
@@ -208,12 +213,13 @@ public final class BluetoothTracker: ObservableObject {
             let imp = device.method(for: sel)
             let fn = unsafeBitCast(imp, to: IntBatteryGetter.self)
             let val = fn(device, sel)
-            // Valid battery percentages are 1 to 100
             if val > 0 && val <= 100 {
                 return val
             }
             return nil
         }
+        
+        let addr = model.address
         
         if isMulti {
             model.leftBattery = getBatteryValue(selectorName: "batteryPercentLeft")
@@ -228,7 +234,10 @@ public final class BluetoothTracker: ObservableObject {
                 ?? getBatteryValue(selectorName: "batteryPercentCombined")
             
             if let single = single {
+                lastValidBattery[addr] = single
                 model.singleBattery = single
+            } else if let cached = lastValidBattery[addr] {
+                model.singleBattery = cached
             }
         }
     }

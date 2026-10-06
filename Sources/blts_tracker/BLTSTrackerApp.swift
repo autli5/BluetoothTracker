@@ -25,9 +25,6 @@ struct BLTSTrackerApp: App {
         if isConn, let p = percent {
             Label(" \(p)%", systemImage: "headphones")
                 .labelStyle(.titleAndIcon)
-        } else if isConn {
-            Label(" ...", systemImage: "headphones")
-                .labelStyle(.titleAndIcon)
         } else {
             Label("", systemImage: "headphones")
                 .labelStyle(.iconOnly)
@@ -37,7 +34,7 @@ struct BLTSTrackerApp: App {
     @ViewBuilder
     private var menuContent: some View {
         if let dev = tracker.activeHeadphone, dev.isConnected {
-            let percentStr = dev.primaryBatteryPercent != nil ? "\(dev.primaryBatteryPercent!)%" : "Определение..."
+            let percentStr = dev.primaryBatteryPercent != nil ? "\(dev.primaryBatteryPercent!)%" : "Подключено"
             Text("🎧 \(dev.name): \(percentStr)")
                 .font(.headline)
             
