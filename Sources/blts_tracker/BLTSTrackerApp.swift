@@ -42,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         
+        // Start active tracking
+        tracker.startTracking()
+        
         // Initial render
         updateStatusItem()
     }

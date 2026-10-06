@@ -16,7 +16,7 @@ public final class BluetoothTracker: ObservableObject {
     @Published public var currentDeviceName: String = ""
     @Published public var isConnected: Bool = false
     
-    private var timer: Timer?
+    private var timerSource: DispatchSourceTimer?
     private var lastValidBattery: [String: Int] = [:]
     
     private typealias IntBatteryGetter = @convention(c) (AnyObject, Selector) -> Int
@@ -35,17 +35,19 @@ public final class BluetoothTracker: ObservableObject {
         stopTracking()
         updateDeviceList()
         
-        // 1.0 second high-frequency poll in .common runloop mode
-        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+        // Kernel-level DispatchSourceTimer: Immune to RunLoop pauses or UI tracking modes
+        let timer = DispatchSource.makeTimerSource(flags: .strict, queue: DispatchQueue.main)
+        timer.schedule(deadline: .now() + 1.0, repeating: 1.0, leeway: .milliseconds(50))
+        timer.setEventHandler { [weak self] in
             self?.updateDeviceList()
         }
-        RunLoop.main.add(t, forMode: .common)
-        self.timer = t
+        timer.resume()
+        self.timerSource = timer
     }
     
     public func stopTracking() {
-        timer?.invalidate()
-        timer = nil
+        timerSource?.cancel()
+        timerSource = nil
     }
     
     public func refreshNow() {
@@ -84,16 +86,18 @@ public final class BluetoothTracker: ObservableObject {
         
         // 1. Scan IOBluetooth paired devices
         if let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] {
-            for device in pairedDevices {
-                let name = device.nameOrAddress ?? "Unknown Device"
-                let address = device.addressString ?? UUID().uuidString
+            for pairedDev in pairedDevices {
+                let address = pairedDev.addressString ?? UUID().uuidString
+                // Re-instantiate device to bypass any internal property caching
+                let device = IOBluetoothDevice(addressString: address) ?? pairedDev
+                let name = device.nameOrAddress ?? pairedDev.nameOrAddress ?? "Unknown Device"
                 
                 let isAudioOutput = activeAudioName != nil && (
                     name.caseInsensitiveCompare(activeAudioName!) == .orderedSame ||
                     activeAudioName!.localizedCaseInsensitiveContains(name) ||
                     name.localizedCaseInsensitiveContains(activeAudioName!)
                 )
-                let isConnected = device.isConnected() || isAudioOutput
+                let isConnected = device.isConnected() || pairedDev.isConnected() || isAudioOutput
                 
                 let majorClass = UInt32(device.deviceClassMajor)
                 let minorClass = UInt32(device.deviceClassMinor)
@@ -119,7 +123,7 @@ public final class BluetoothTracker: ObservableObject {
                 )
                 
                 if isConnected {
-                    extractBatteryLevels(from: device, into: &model, isMulti: isMulti)
+                    extractBatteryLevels(from: device, fallbackDevice: pairedDev, into: &model, isMulti: isMulti)
                 }
                 
                 updatedList.append(model)
@@ -225,33 +229,38 @@ public final class BluetoothTracker: ObservableObject {
         return false
     }
     
-    private func extractBatteryLevels(from device: IOBluetoothDevice, into model: inout BluetoothDeviceModel, isMulti: Bool) {
-        func getBatteryValue(selectorName: String) -> Int? {
+    private func extractBatteryLevels(from device: IOBluetoothDevice, fallbackDevice: IOBluetoothDevice? = nil, into model: inout BluetoothDeviceModel, isMulti: Bool) {
+        func getBatteryValue(from dev: IOBluetoothDevice, selectorName: String) -> Int? {
             let sel = Selector((selectorName))
-            guard device.responds(to: sel) else { return nil }
-            let imp = device.method(for: sel)
+            guard dev.responds(to: sel) else { return nil }
+            let imp = dev.method(for: sel)
             let fn = unsafeBitCast(imp, to: IntBatteryGetter.self)
-            let val = fn(device, sel)
+            let val = fn(dev, sel)
             if val > 0 && val <= 100 {
                 return val
             }
             return nil
         }
         
+        func query(selectorName: String) -> Int? {
+            return getBatteryValue(from: device, selectorName: selectorName)
+                ?? (fallbackDevice != nil ? getBatteryValue(from: fallbackDevice!, selectorName: selectorName) : nil)
+        }
+        
         let addr = model.address
         
         if isMulti {
-            model.leftBattery = getBatteryValue(selectorName: "batteryPercentLeft")
-            model.rightBattery = getBatteryValue(selectorName: "batteryPercentRight")
-            model.caseBattery = getBatteryValue(selectorName: "batteryPercentCase")
-            model.combinedBattery = getBatteryValue(selectorName: "batteryPercentCombined")
-            model.singleBattery = getBatteryValue(selectorName: "batteryPercentSingle")
+            model.leftBattery = query(selectorName: "batteryPercentLeft")
+            model.rightBattery = query(selectorName: "batteryPercentRight")
+            model.caseBattery = query(selectorName: "batteryPercentCase")
+            model.combinedBattery = query(selectorName: "batteryPercentCombined")
+            model.singleBattery = query(selectorName: "batteryPercentSingle")
         } else {
-            let single = getBatteryValue(selectorName: "batteryPercentSingle")
-                ?? getBatteryValue(selectorName: "headsetBatteryPercent")
-                ?? getBatteryValue(selectorName: "batteryLevel")
-                ?? getBatteryValue(selectorName: "batteryPercentCombined")
-                ?? getBatteryValue(selectorName: "batteryPercentLeft")
+            let single = query(selectorName: "batteryPercentSingle")
+                ?? query(selectorName: "headsetBatteryPercent")
+                ?? query(selectorName: "batteryLevel")
+                ?? query(selectorName: "batteryPercentCombined")
+                ?? query(selectorName: "batteryPercentLeft")
             
             if let single = single {
                 lastValidBattery[addr] = single
