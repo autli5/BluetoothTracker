@@ -15,6 +15,7 @@ public final class BluetoothTracker: ObservableObject {
     @Published public var currentBatteryPercent: Int?
     @Published public var currentDeviceName: String = ""
     @Published public var isConnected: Bool = false
+    @Published public var isBluetoothPoweredOn: Bool = true
     
     private var timerSource: DispatchSourceTimer?
     private var knownBatteries: [String: Int] = [:]
@@ -22,6 +23,11 @@ public final class BluetoothTracker: ObservableObject {
     private typealias VoidFn = @convention(c) (AnyObject, Selector) -> Void
     private typealias IntBatteryGetter = @convention(c) (AnyObject, Selector) -> Int
     private typealias BoolGetter = @convention(c) (AnyObject, Selector) -> Bool
+    
+    public static func checkBluetoothPower() -> Bool {
+        guard let controller = IOBluetoothHostController.default() else { return false }
+        return controller.powerState == kBluetoothHCIPowerStateON
+    }
     
     private func syncFromServer(device: IOBluetoothDevice) {
         let selUpdate = Selector(("updateFromServer"))
@@ -47,7 +53,9 @@ public final class BluetoothTracker: ObservableObject {
     }
     
     public init() {
+        self.isBluetoothPoweredOn = BluetoothTracker.checkBluetoothPower()
         setupBluetoothListeners()
+        setupAudioListeners()
         startTracking()
     }
     
@@ -60,9 +68,9 @@ public final class BluetoothTracker: ObservableObject {
         updateDeviceList()
         pollSubprocessProbe()
         
-        // Kernel-level DispatchSourceTimer: strictly 1 second interval
+        // Strict 500ms DispatchSourceTimer for instant real-time reactivity
         let timer = DispatchSource.makeTimerSource(flags: .strict, queue: DispatchQueue.main)
-        timer.schedule(deadline: .now() + 1.0, repeating: 1.0, leeway: .milliseconds(50))
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5, leeway: .milliseconds(50))
         timer.setEventHandler { [weak self] in
             self?.updateDeviceList()
             self?.pollSubprocessProbe()
@@ -80,6 +88,14 @@ public final class BluetoothTracker: ObservableObject {
     
     public func pollSubprocessProbe() {
         guard !isProbeRunning else { return }
+        
+        // Instant check: if Bluetooth is off, no need to run probe
+        if !BluetoothTracker.checkBluetoothPower() {
+            if isBluetoothPoweredOn || isConnected || currentBatteryPercent != nil {
+                applyPowerOffState()
+            }
+            return
+        }
         
         var probeBin: String? = nil
         var probeArgs: [String] = []
@@ -99,7 +115,7 @@ public final class BluetoothTracker: ObservableObject {
         guard let binary = probeBin else { return }
         
         isProbeRunning = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             defer { self?.isProbeRunning = false }
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: binary)
@@ -111,18 +127,7 @@ public final class BluetoothTracker: ObservableObject {
                 proc.waitUntilExit()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                    var parsed: [String: Int] = [:]
-                    for line in output.components(separatedBy: .newlines) {
-                        let parts = line.split(separator: ":")
-                        if parts.count == 2, let b = Int(parts[1]) {
-                            parsed[String(parts[0])] = b
-                        }
-                    }
-                    if !parsed.isEmpty {
-                        DispatchQueue.main.async {
-                            self?.applyProbeBatteries(parsed)
-                        }
-                    }
+                    self?.parseProbeOutput(output)
                 }
             } catch {
                 // Ignore probe errors
@@ -130,27 +135,173 @@ public final class BluetoothTracker: ObservableObject {
         }
     }
     
-    private func applyProbeBatteries(_ probeResults: [String: Int]) {
-        var changed = false
-        for i in 0..<devices.count {
-            if let fresh = probeResults[devices[i].address], fresh > 0 && fresh <= 100 {
-                if devices[i].singleBattery != fresh {
-                    devices[i].singleBattery = fresh
-                    knownBatteries[devices[i].address] = fresh
-                    changed = true
+    private struct ProbeDev {
+        let address: String
+        let name: String
+        let isConnected: Bool
+        let singleBattery: Int?
+        let leftBattery: Int?
+        let rightBattery: Int?
+        let caseBattery: Int?
+        let combinedBattery: Int?
+    }
+    
+    private func parseProbeOutput(_ output: String) {
+        var powerOn: Bool = true
+        var devMap: [String: ProbeDev] = [:]
+        
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("POWER:") {
+                let val = trimmed.replacingOccurrences(of: "POWER:", with: "")
+                powerOn = (val == "1")
+            } else if trimmed.hasPrefix("DEV:") {
+                let parts = trimmed.split(separator: ":", omittingEmptySubsequences: false)
+                if parts.count >= 8 {
+                    let addr = String(parts[1])
+                    let name = String(parts[2])
+                    let conn = parts[3] == "1"
+                    let single = Int(parts[4]).flatMap { $0 > 0 && $0 <= 100 ? $0 : nil }
+                    let left = Int(parts[5]).flatMap { $0 > 0 && $0 <= 100 ? $0 : nil }
+                    let right = Int(parts[6]).flatMap { $0 > 0 && $0 <= 100 ? $0 : nil }
+                    let bCase = Int(parts[7]).flatMap { $0 > 0 && $0 <= 100 ? $0 : nil }
+                    let comb = (parts.count > 8 ? Int(parts[8]) : nil).flatMap { $0 > 0 && $0 <= 100 ? $0 : nil }
+                    
+                    devMap[addr] = ProbeDev(
+                        address: addr,
+                        name: name,
+                        isConnected: conn,
+                        singleBattery: single,
+                        leftBattery: left,
+                        rightBattery: right,
+                        caseBattery: bCase,
+                        combinedBattery: comb
+                    )
                 }
             }
         }
         
-        if let active = activeHeadphone, let fresh = probeResults[active.address], fresh > 0 && fresh <= 100 {
-            if activeHeadphone?.singleBattery != fresh {
-                activeHeadphone?.singleBattery = fresh
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if !powerOn {
+                self.applyPowerOffState()
+            } else {
+                self.applyProbeDevices(devMap)
+            }
+        }
+    }
+    
+    private func applyPowerOffState() {
+        var changed = false
+        if self.isBluetoothPoweredOn {
+            self.isBluetoothPoweredOn = false
+            changed = true
+        }
+        if self.isConnected {
+            self.isConnected = false
+            changed = true
+        }
+        if self.currentBatteryPercent != nil {
+            self.currentBatteryPercent = nil
+            changed = true
+        }
+        if !self.currentDeviceName.isEmpty {
+            self.currentDeviceName = ""
+            changed = true
+        }
+        if self.activeHeadphone != nil {
+            self.activeHeadphone = nil
+            changed = true
+        }
+        self.knownBatteries.removeAll()
+        for i in 0..<self.devices.count {
+            if self.devices[i].isConnected {
+                self.devices[i].isConnected = false
                 changed = true
             }
-            if currentBatteryPercent != fresh {
-                currentBatteryPercent = fresh
+            if self.devices[i].singleBattery != nil {
+                self.devices[i].singleBattery = nil
                 changed = true
             }
+        }
+        if changed {
+            self.objectWillChange.send()
+            NotificationCenter.default.post(name: BluetoothTracker.didUpdateNotification, object: self)
+        }
+    }
+    
+    private func applyProbeDevices(_ devMap: [String: ProbeDev]) {
+        var changed = false
+        if !self.isBluetoothPoweredOn {
+            self.isBluetoothPoweredOn = true
+            changed = true
+        }
+        
+        for i in 0..<devices.count {
+            let addr = devices[i].address
+            if let p = devMap[addr] {
+                if devices[i].isConnected != p.isConnected {
+                    devices[i].isConnected = p.isConnected
+                    changed = true
+                }
+                if p.isConnected {
+                    if let fresh = p.singleBattery, fresh > 0 && fresh <= 100 {
+                        if devices[i].singleBattery != fresh {
+                            devices[i].singleBattery = fresh
+                            knownBatteries[addr] = fresh
+                            changed = true
+                        }
+                    }
+                    if let l = p.leftBattery, devices[i].leftBattery != l {
+                        devices[i].leftBattery = l
+                        changed = true
+                    }
+                    if let r = p.rightBattery, devices[i].rightBattery != r {
+                        devices[i].rightBattery = r
+                        changed = true
+                    }
+                    if let c = p.caseBattery, devices[i].caseBattery != c {
+                        devices[i].caseBattery = c
+                        changed = true
+                    }
+                    if let comb = p.combinedBattery, devices[i].combinedBattery != comb {
+                        devices[i].combinedBattery = comb
+                        changed = true
+                    }
+                } else {
+                    knownBatteries.removeValue(forKey: addr)
+                    if devices[i].singleBattery != nil {
+                        devices[i].singleBattery = nil
+                        changed = true
+                    }
+                }
+            }
+        }
+        
+        let foundActive = devices.first(where: { $0.isConnected && $0.isAudioDevice })
+            ?? devices.first(where: { $0.isConnected })
+        
+        if activeHeadphone?.address != foundActive?.address {
+            activeHeadphone = foundActive
+            changed = true
+        }
+        
+        let newPercent = foundActive?.primaryBatteryPercent
+        if currentBatteryPercent != newPercent {
+            currentBatteryPercent = newPercent
+            changed = true
+        }
+        
+        let newName = foundActive?.name ?? ""
+        if currentDeviceName != newName {
+            currentDeviceName = newName
+            changed = true
+        }
+        
+        let newConn = foundActive?.isConnected == true
+        if isConnected != newConn {
+            isConnected = newConn
+            changed = true
         }
         
         if changed {
@@ -161,9 +312,7 @@ public final class BluetoothTracker: ObservableObject {
     
     public func refreshNow() {
         updateDeviceList()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.updateDeviceList()
-        }
+        pollSubprocessProbe()
     }
     
     private func setupBluetoothListeners() {
@@ -173,7 +322,9 @@ public final class BluetoothTracker: ObservableObject {
             "IOBluetoothDeviceNotification",
             "IOBluetoothDeviceServicesResolvedNotification",
             "IOBluetoothDeviceNameChangedNotification",
-            "IOBluetoothHandsFreeDeviceDidUpdateNotification"
+            "IOBluetoothHandsFreeDeviceDidUpdateNotification",
+            "com.apple.Bluetooth.status",
+            "com.apple.bluetooth.status"
         ]
         
         for name in notificationNames {
@@ -192,18 +343,41 @@ public final class BluetoothTracker: ObservableObject {
         }
     }
     
+    private func setupAudioListeners() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main
+        ) { [weak self] _, _ in
+            self?.refreshNow()
+        }
+    }
+    
     @objc private func handleBluetoothChange() {
         DispatchQueue.main.async { [weak self] in
-            self?.updateDeviceList()
+            self?.refreshNow()
         }
-        for delay in [0.2, 0.5, 1.0, 1.5, 2.0] {
+        for delay in [0.2, 0.5, 1.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.updateDeviceList()
+                self?.refreshNow()
             }
         }
     }
     
     public func updateDeviceList() {
+        let powerOn = BluetoothTracker.checkBluetoothPower()
+        self.isBluetoothPoweredOn = powerOn
+        
+        if !powerOn {
+            applyPowerOffState()
+            return
+        }
+        
         var updatedList: [BluetoothDeviceModel] = []
         let activeAudioName = getActiveCoreAudioDeviceName()
         
@@ -225,7 +399,7 @@ public final class BluetoothTracker: ObservableObject {
                     activeAudioName!.localizedCaseInsensitiveContains(name) ||
                     name.localizedCaseInsensitiveContains(activeAudioName!)
                 )
-                let isConnected = device.isConnected() || pairedDev.isConnected() || isAudioOutput
+                let isConnected = (device.isConnected() || pairedDev.isConnected())
                 
                 let majorClass = UInt32(device.deviceClassMajor)
                 let minorClass = UInt32(device.deviceClassMinor)

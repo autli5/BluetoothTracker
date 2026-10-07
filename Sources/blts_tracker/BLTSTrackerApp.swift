@@ -28,38 +28,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     
     private static func runBatteryProbe() {
+        let isPowerOn = (IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON)
+        print("POWER:\(isPowerOn ? 1 : 0)")
+        guard isPowerOn else { exit(0) }
+        
         typealias IntGetter = @convention(c) (AnyObject, Selector) -> Int
-        let selSingle = Selector(("batteryPercentSingle"))
-        let selPeer = Selector(("peer"))
+        func getInt(_ target: AnyObject, _ selName: String) -> Int? {
+            let sel = Selector((selName))
+            if target.responds(to: sel) {
+                let imp = target.method(for: sel)
+                let fn = unsafeBitCast(imp, to: IntGetter.self)
+                let v = fn(target, sel)
+                if v > 0 && v <= 100 { return v }
+            }
+            return nil
+        }
         
         if let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] {
-            for dev in paired where dev.isConnected() {
+            let selPeer = Selector(("peer"))
+            for dev in paired {
                 let addr = dev.addressString ?? ""
-                var batt: Int? = nil
+                let name = dev.nameOrAddress ?? ""
+                let connected = dev.isConnected()
                 
-                if dev.responds(to: selSingle) {
-                    let imp = dev.method(for: selSingle)
-                    let fn = unsafeBitCast(imp, to: IntGetter.self)
-                    let val = fn(dev, selSingle)
-                    if val > 0 && val <= 100 {
-                        batt = val
-                    }
+                var single = getInt(dev, "batteryPercentSingle") ?? getInt(dev, "headsetBattery")
+                var left = getInt(dev, "batteryPercentLeft")
+                var right = getInt(dev, "batteryPercentRight")
+                var bCase = getInt(dev, "batteryPercentCase")
+                var combined = getInt(dev, "batteryPercentCombined")
+                
+                if dev.responds(to: selPeer),
+                   let peer = dev.perform(selPeer)?.takeUnretainedValue() as? NSObject {
+                    if single == nil { single = getInt(peer, "batteryPercentSingle") ?? getInt(peer, "headsetBattery") }
+                    if left == nil { left = getInt(peer, "batteryPercentLeft") }
+                    if right == nil { right = getInt(peer, "batteryPercentRight") }
+                    if bCase == nil { bCase = getInt(peer, "batteryPercentCase") }
+                    if combined == nil { combined = getInt(peer, "batteryPercentCombined") }
                 }
                 
-                if batt == nil, dev.responds(to: selPeer),
-                   let peer = dev.perform(selPeer)?.takeUnretainedValue() as? NSObject,
-                   peer.responds(to: selSingle) {
-                    let imp = peer.method(for: selSingle)
-                    let fn = unsafeBitCast(imp, to: IntGetter.self)
-                    let val = fn(peer, selSingle)
-                    if val > 0 && val <= 100 {
-                        batt = val
-                    }
-                }
+                let sStr = single.map(String.init) ?? "-1"
+                let lStr = left.map(String.init) ?? "-1"
+                let rStr = right.map(String.init) ?? "-1"
+                let cStr = bCase.map(String.init) ?? "-1"
+                let combStr = combined.map(String.init) ?? "-1"
                 
-                if let b = batt {
-                    print("\(addr):\(b)")
-                }
+                print("DEV:\(addr):\(name):\(connected ? 1 : 0):\(sStr):\(lStr):\(rStr):\(cStr):\(combStr)")
             }
         }
     }
@@ -94,8 +107,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Start active tracking
         tracker.startTracking()
         
-        // Direct main thread timer in AppDelegate for guaranteed 1-second UI refresh
-        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        // Fast 0.5s timer in AppDelegate
+        let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.tracker.updateDeviceList()
             self?.updateStatusItem()
         }
@@ -123,9 +136,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         
-        // Find best active device (either marked active or any connected device with battery data)
+        let isPowerOn = tracker.isBluetoothPoweredOn
         let active = tracker.activeHeadphone ?? tracker.devices.first(where: { $0.isConnected && $0.primaryBatteryPercent != nil })
-        let isConn = active?.isConnected == true
+        let isConn = isPowerOn && (active?.isConnected == true)
         let percent = tracker.currentBatteryPercent ?? active?.primaryBatteryPercent
         
         if button.image == nil || button.image?.accessibilityDescription != "Bluetooth Battery" {
@@ -136,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if isConn, let p = percent, p > 0 {
             button.title = " \(p)%"
         } else {
+            // When Bluetooth is off or headphones disconnected: show ONLY the headphones icon
             button.title = ""
         }
         
@@ -143,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.needsLayout = true
         button.needsDisplay = true
         
-        let logLine = "[\(Date())] Dev: \(active?.name ?? "none") | Conn: \(isConn) | Battery: \(percent.map(String.init) ?? "nil") | Title: '\(button.title)'\n"
+        let logLine = "[\(Date())] Dev: \(active?.name ?? "none") | Conn: \(isConn) | Power: \(isPowerOn) | Battery: \(percent.map(String.init) ?? "nil") | Title: '\(button.title)'\n"
         if let data = logLine.data(using: .utf8) {
             if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/blts_live.log")) {
                 handle.seekToEndOfFile()
@@ -162,8 +176,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func buildMenu(_ menu: NSMenu) {
         menu.removeAllItems()
         
+        let isPowerOn = tracker.isBluetoothPoweredOn
         let active = tracker.activeHeadphone ?? tracker.devices.first(where: { $0.isConnected && $0.primaryBatteryPercent != nil })
-        if let dev = active, dev.isConnected {
+        
+        if !isPowerOn {
+            let item = NSMenuItem(title: "⚠️ Bluetooth выключен", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        } else if let dev = active, dev.isConnected {
             let batt = tracker.currentBatteryPercent ?? dev.primaryBatteryPercent
             let percentStr = batt != nil ? "\(batt!)%" : "Подключено"
             let titleItem = NSMenuItem(title: "🎧 \(dev.name): \(percentStr)", action: nil, keyEquivalent: "")
