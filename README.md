@@ -39,9 +39,16 @@ open "/Users/autli/Documents/blts_tracker/BLTS Tracker.app"
 
 Если вы изменили код или хотите пересобрать приложение:
 ```bash
-cd /Users/autli/Documents/blts_tracker
 ./build_app.sh
 ```
+
+### 💿 Создание DMG-инсталлятора
+
+Для создания установочного образа `.dmg` (Drag-and-Drop в `Applications`):
+```bash
+./create_dmg.sh
+```
+В корне проекта появится готовый файл `BLTS-Tracker.dmg`.
 
 ---
 
