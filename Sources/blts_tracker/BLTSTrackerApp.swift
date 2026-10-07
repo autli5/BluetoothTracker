@@ -107,9 +107,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Start active tracking
         tracker.startTracking()
         
-        // Fast 0.5s timer in AppDelegate
-        let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.tracker.updateDeviceList()
+        // Regular safety UI sync timer in AppDelegate
+        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateStatusItem()
         }
         RunLoop.main.add(t, forMode: .common)
